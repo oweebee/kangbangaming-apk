@@ -22,6 +22,13 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform & build tools
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" --sdk_root=$ANDROID_SDK_ROOT
+
       - name: Install Gradle 8.6
         run: |
           wget -q https://services.gradle.org/distributions/gradle-8.6-bin.zip -P /tmp
@@ -32,9 +39,6 @@ jobs:
         run: |
           gradle wrapper --gradle-version=8.6 --distribution-type=bin
           chmod +x gradlew
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
@@ -48,7 +52,7 @@ jobs:
             APK Android — WebView KangBanGaming
 
             **Installation :**
-            1. Télécharge `KangBanGaming.apk`
+            1. Télécharge `app-debug.apk`
             2. Transfère sur ton téléphone Android
             3. Paramètres → Sécurité → Sources inconnues → Autoriser
             4. Ouvre le `.apk` pour installer
