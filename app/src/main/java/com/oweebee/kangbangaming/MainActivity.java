@@ -32,10 +32,6 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // NE PAS mettre le fullscreen ici — l'écran de setup a besoin du comportement par défaut
-        // (clavier qui pousse le contenu vers le haut).
-        // Le fullscreen est appliqué uniquement dans loadWebView().
-
         String savedUrl = prefs().getString(PREF_URL, null);
         if (savedUrl == null || savedUrl.isEmpty()) {
             showSetup();
@@ -44,10 +40,21 @@ public class MainActivity extends Activity {
         }
     }
 
+    // Appelé à chaque fois que la fenêtre gagne le focus (retour d'un dialog, d'une autre app…)
+    // C'est l'endroit correct pour appliquer le fullscreen — le hide() est ignoré si la window
+    // n'a pas encore de vue attachée, donc appeler ça ici garantit qu'il prend effet.
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && webView != null) {
+            applyFullscreen();
+        }
+    }
+
     // ── Écran de configuration (premier lancement) ────────────────────────────
 
     private void showSetup() {
-        // Comportement fenêtre par défaut — le clavier pousse normalement le contenu
+        // Setup screen : comportement clavier normal (le clavier pousse le contenu vers le haut)
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 
         LinearLayout root = new LinearLayout(this);
@@ -121,60 +128,74 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    // ── Cycle de vie WebView ──────────────────────────────────────────────────
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.onResume();
+            // Si le renderer a été tué en background, l'URL est null → recharger
+            if (webView.getUrl() == null || webView.getUrl().isEmpty()) {
+                String savedUrl = prefs().getString(PREF_URL, null);
+                if (savedUrl != null) webView.loadUrl(savedUrl);
+            }
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (webView != null) webView.onPause();
+    }
+
     // ── WebView ───────────────────────────────────────────────────────────────
 
     private void loadWebView(String url) {
-        // Fullscreen uniquement ici, pour le WebView
-        applyFullscreen();
+        // Détruire l'ancien WebView s'il existe (changement de serveur, renderer crash…)
+        if (webView != null) {
+            webView.stopLoading();
+            webView.destroy();
+            webView = null;
+        }
 
         webView = new WebView(this);
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        s.setLoadWithOverviewMode(true);
-        s.setUseWideViewPort(true);
+        s.setUseWideViewPort(true);        // respecte le <meta viewport> de la page
+        s.setLoadWithOverviewMode(false);  // NE PAS zoomer pour faire rentrer tout le contenu
+                                           // → la page s'affiche en 1:1 → React détecte mobile
         s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setLayoutAlgorithm(WebSettings.LayoutAlgorithm.NORMAL);
 
+        // User agent : remplace "wv" (WebView marker) par un UA Chrome normal.
+        // Steam et d'autres services bloquent les WebViews identifiées — ceci évite ça.
+        String ua = s.getUserAgentString().replace("; wv)", ")");
+        s.setUserAgentString(ua);
+
         // Pas de scrollbar horizontal
         webView.setHorizontalScrollBarEnabled(false);
         webView.setScrollbarFadingEnabled(true);
 
-        // Android 11+ : le clavier envoie des IME insets au lieu de redimensionner la fenêtre.
-        // Sans ce listener, le clavier recouvre le contenu. Ce listener ajuste le padding bas
-        // du WebView selon la hauteur du clavier.
+        // Android 11+ : le clavier envoie des IME insets.
+        // Ce listener ajuste le padding bas du WebView selon la hauteur du clavier.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             webView.setOnApplyWindowInsetsListener((v, insets) -> {
                 int imeHeight = insets.getInsets(WindowInsets.Type.ime()).bottom;
                 int navHeight = insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
-                // Quand le clavier est ouvert : padding = hauteur clavier
-                // Quand fermé : padding = hauteur barre nav (0 si navigation gestuelle)
                 v.setPadding(0, 0, 0, imeHeight > 0 ? imeHeight : navHeight);
                 return insets;
             });
         }
 
-        webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return false;
-            }
-
-            @Override
-            public void onPageFinished(WebView view, String pageUrl) {
-                // Délai 500ms : React a besoin d'un tick pour rendre le DOM réel avant injection
-                view.postDelayed(() -> injectViewportFix(view), 500);
-            }
-        });
-
         // Sans WebChromeClient, window.confirm / window.alert / window.prompt sont muets.
-        // Les boutons "Supprimer une note" utilisent window.confirm — ils ne fonctionneraient pas.
         webView.setWebChromeClient(new android.webkit.WebChromeClient() {
             @Override
-            public boolean onJsAlert(WebView view, String url, String message, android.webkit.JsResult result) {
+            public boolean onJsAlert(WebView view, String url2, String message, android.webkit.JsResult result) {
                 new AlertDialog.Builder(MainActivity.this)
                     .setMessage(message)
                     .setPositiveButton(android.R.string.ok, (d, w) -> result.confirm())
@@ -183,7 +204,7 @@ public class MainActivity extends Activity {
                 return true;
             }
             @Override
-            public boolean onJsConfirm(WebView view, String url, String message, android.webkit.JsResult result) {
+            public boolean onJsConfirm(WebView view, String url2, String message, android.webkit.JsResult result) {
                 new AlertDialog.Builder(MainActivity.this)
                     .setMessage(message)
                     .setPositiveButton(android.R.string.ok, (d, w) -> result.confirm())
@@ -193,8 +214,8 @@ public class MainActivity extends Activity {
                 return true;
             }
             @Override
-            public boolean onJsPrompt(WebView view, String url, String message, String defaultValue, android.webkit.JsPromptResult result) {
-                final android.widget.EditText input = new android.widget.EditText(MainActivity.this);
+            public boolean onJsPrompt(WebView view, String url2, String message, String defaultValue, android.webkit.JsPromptResult result) {
+                final EditText input = new EditText(MainActivity.this);
                 input.setText(defaultValue);
                 new AlertDialog.Builder(MainActivity.this)
                     .setMessage(message)
@@ -207,11 +228,37 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Appui long → changer d'URL
-        webView.setOnLongClickListener(v -> {
-            showUrlChangeDialog();
-            return true;
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return false;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String pageUrl) {
+                injectOverflowFix(view);
+                // Re-injecter après le premier render React (au cas où il serait tardif)
+                view.postDelayed(() -> injectOverflowFix(view), 800);
+            }
+
+            // CRITIQUE : sans ce handler, Android crashe le processus principal si le
+            // renderer WebView est tué par le système (RAM faible, Android 14/15 Pixel 9).
+            // Retourner true indique qu'on gère la situation — on recrée proprement le WebView.
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                String savedUrl = prefs().getString(PREF_URL, null);
+                if (savedUrl != null) {
+                    // loadWebView détruit l'ancien WebView et en crée un neuf
+                    loadWebView(savedUrl);
+                }
+                return true; // NE PAS retourner false — crasherait le processus principal
+            }
         });
+
+        // ── PAS de setOnLongClickListener ──────────────────────────────────────
+        // L'appui long est utilisé par le Kanban pour déplacer les cartes (drag & drop).
+        // Un listener ici intercepterait le geste et bloquerait le glissement des cartes.
+        // Pour changer de serveur → bouton retour → "Changer de serveur" dans le dialog.
 
         webView.setLayoutParams(new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -219,26 +266,28 @@ public class MainActivity extends Activity {
         ));
 
         setContentView(webView);
+
+        // Appliquer le fullscreen maintenant que le WebView est attaché à la fenêtre
+        applyFullscreen();
+
         webView.loadUrl(url);
     }
 
-    // ── Injection JS : force la largeur à device-width ───────────────────────
+    // ── Injection CSS overflow-x ─────────────────────────────────────────────
+    // Injecte une balise <style> persistante dans <head>.
+    // Différence clé avec des inline styles : React ne touche jamais les <style> du <head>,
+    // donc cette règle survit à tous les re-renders (sauvegarde de note, ouverture modale, etc.)
+    // Le !important garantit la priorité sur tout ce que React peut injecter.
 
-    private void injectViewportFix(WebView view) {
+    private void injectOverflowFix(WebView view) {
         view.evaluateJavascript(
-            "(function() {" +
-            "  var meta = document.querySelector('meta[name=viewport]');" +
-            "  if (!meta) {" +
-            "    meta = document.createElement('meta');" +
-            "    meta.name = 'viewport';" +
-            "    if (document.head) document.head.appendChild(meta);" +
-            "  }" +
-            "  meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';" +
-            "  if (document.documentElement) document.documentElement.style.maxWidth = '100vw';" +
-            "  if (document.body) {" +
-            "    document.body.style.maxWidth = '100vw';" +
-            "    document.body.style.overflowX = 'hidden';" +
-            "  }" +
+            "(function(){" +
+            "  if(document.getElementById('kwv-fix'))return;" +  // déjà injecté
+            "  var s=document.createElement('style');" +
+            "  s.id='kwv-fix';" +
+            "  s.textContent=" +
+            "    'html,body{overflow-x:hidden!important;max-width:100vw!important}';" +
+            "  document.head&&document.head.appendChild(s);" +
             "})()",
             null
         );
@@ -248,9 +297,6 @@ public class MainActivity extends Activity {
 
     private void applyFullscreen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ : edge-to-edge + masquer barres système
-            // NE PAS utiliser SOFT_INPUT_ADJUST_PAN ici — il est ignoré sur API 30+
-            // Le listener IME insets sur le WebView prend en charge le clavier.
             getWindow().setDecorFitsSystemWindows(false);
             WindowInsetsController ctrl = getWindow().getInsetsController();
             if (ctrl != null) {
@@ -258,7 +304,6 @@ public class MainActivity extends Activity {
                 ctrl.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
         } else {
-            // Android 8-10 : méthode classique
             getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN);
             getWindow().setFlags(
                 WindowManager.LayoutParams.FLAG_FULLSCREEN,
@@ -304,6 +349,7 @@ public class MainActivity extends Activity {
     }
 
     // ── Bouton retour ─────────────────────────────────────────────────────────
+    // Le long-press sur le WebView étant retiré, "Changer de serveur" est ici.
 
     @Override
     public void onBackPressed() {
@@ -311,10 +357,14 @@ public class MainActivity extends Activity {
             webView.goBack();
         } else {
             new AlertDialog.Builder(this)
-                .setTitle("Quitter")
-                .setMessage("Quitter KangBanGaming ?")
-                .setPositiveButton("Quitter", (d, w) -> finish())
-                .setNegativeButton("Annuler", null)
+                .setTitle("KangBanGaming")
+                .setItems(
+                    new CharSequence[]{"Changer de serveur", "Quitter l'app"},
+                    (dialog, which) -> {
+                        if (which == 0) showUrlChangeDialog();
+                        else finish();
+                    }
+                )
                 .show();
         }
     }

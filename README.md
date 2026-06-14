@@ -44,6 +44,7 @@ L'URL est sauvegardée — les lancements suivants ouvrent directement l'app.
 - **Clavier** — le contenu défile pour que le champ actif reste visible ; pas d'élargissement de l'écran
 - **Dialogs JS** — `alert`, `confirm`, `prompt` (ex. : supprimer une note) s'affichent comme des dialogs Android natifs
 - **Retour** — le bouton retour Android navigue dans l'historique du WebView ; si plus d'historique, propose de quitter
+- **Résilience** — si le processus WebView est tué par Android (Android 14+), l'app se recharge automatiquement sans crasher
 
 ---
 
